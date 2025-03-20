@@ -54,18 +54,44 @@ def make_call(url, params=None, headers=None, session=None, skip_cache=False, te
         ctx.verify_mode = ssl.CERT_REQUIRED
         session.mount('https://', SSLAdapter(ssl_context=ctx))
 
-    response = session.get(url, headers=headers, params=params)
+    retries = 3  # Total number of retries
+    base_delay = 3  # Initial delay in seconds
+    max_delay = 15  # Maximum delay in seconds
 
-    if response.status_code == 200:
-        if not skip_cache:
-            with open(req_cache_file, 'w', encoding='utf-8') as cf:
-                cf.write(response.text)
-        if text:
-            return response.text
-        return json.loads(response.text)
-    else:
-        logger.info(f"Request status error {response.status_code}: {url}")
-        return None
+    for attempt in range(retries):
+        try:
+            response = session.get(url, headers=headers, params=params)
+            response.raise_for_status()  # Raise HTTP errors
+
+            if response.status_code == 200:
+                if not skip_cache:
+                    with open(req_cache_file, 'w', encoding='utf-8') as cf:
+                        cf.write(response.text)
+                if text:
+                    return response.text
+                return json.loads(response.text)
+            else:
+                logger.info(f"Request status error {response.status_code}: {url}")
+                return None
+
+        except requests.exceptions.HTTPError as e:
+            if e.response.status_code == 429:
+                # Calculate progressive delay
+                delay = min(base_delay * (attempt + 1), max_delay)  # Increase delay progressively, capped at max_delay
+                retry_after = int(e.response.headers.get('Retry-After', delay))  # Use 'Retry-After' header or calculated delay
+                logger.warning(f"Rate limited. Retrying after {retry_after} seconds. Attempt {attempt + 1}/{retries}")
+                time.sleep(retry_after)
+                continue
+            else:
+                logger.error(f"HTTP error: {e}")
+                return None
+
+        except Exception as e:
+            logger.error(f"Unexpected error: {e}")
+            return None
+
+    logger.error(f"Failed to fetch data after {retries} retries: {url}")
+    return None
 
 
 def format_local_id(item_id):
